@@ -1,0 +1,39 @@
+name: Expiry
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    # Monday morning, so a new nginx release that breaks the module shows
+    # up here and not in somebody's build
+    - cron: '59 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  expiry:
+    name: three certificates with known end dates
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The suite in t/ can reach the configuration and the variable, but not
+    # the warning: it is written when the worker starts and again on a
+    # timer, it lands in the error log, and the interesting certificate is
+    # one that has already expired.  Here those dates are made on purpose.
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup
+        with:
+          test-nginx: 'false'
+
+      - name: Build nginx
+        run: |
+          . .github/versions.env
+          ci/build.sh "$NGINX_VERSION" "$HOME/nginx"
+
+      - name: Expiring, expired and healthy
+        run: ci/expiry.sh "$HOME/nginx/sbin/nginx"
