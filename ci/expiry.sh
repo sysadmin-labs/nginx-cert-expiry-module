@@ -1,12 +1,11 @@
 #!/bin/sh
 #
-# Hand the module three certificates whose end dates are known and read
-# back what it says about them.
+# Hand the module three certificates with known end dates and read back
+# what it reports.
 #
-# A test suite cannot do this: the warning is written when the worker
-# starts and again on a timer, it lands in the error log rather than in a
-# response, and the interesting certificate is one that has already
-# expired -- which no suite can wait for.  So the dates are made here.
+# t/ cannot do this: the report is written when a worker starts and again on
+# a timer, it goes to the error log and not into a response, and one of the
+# three certificates has to be expired already.
 #
 # usage: ci/expiry.sh <nginx binary>
 #
@@ -32,23 +31,72 @@ note() {
 }
 
 stamp() {
-	# $1 days from now, in the format openssl wants
+	# $1 is a signed number of days, "+3" or "-5"; GNU date, then BSD
 	date -u -d "$1 days" +%Y%m%d%H%M%SZ 2>/dev/null ||
 		date -u -v"$1"d +%Y%m%d%H%M%SZ
 }
 
+# An expired certificate cannot be made with "req -x509 -days", which
+# counts forward from now, and -not_before/-not_after exist only from
+# OpenSSL 3.2 on.  Signing through a local CA with -startdate/-enddate
+# works on every version in use.
+mkdir -p "$WORK/ca/newcerts"
+: > "$WORK/ca/index.txt"
+echo 1000 > "$WORK/ca/serial"
+
+cat > "$WORK/ca/openssl.cnf" <<CNF
+[ ca ]
+default_ca = test_ca
+
+[ test_ca ]
+dir             = $WORK/ca
+database        = \$dir/index.txt
+new_certs_dir   = \$dir/newcerts
+serial          = \$dir/serial
+certificate     = \$dir/ca.crt
+private_key     = \$dir/ca.key
+default_md      = sha256
+policy          = anything
+email_in_dn     = no
+rand_serial     = no
+unique_subject  = no
+preserve        = no
+
+[ anything ]
+commonName              = optional
+countryName             = optional
+stateOrProvinceName     = optional
+localityName            = optional
+organizationName        = optional
+organizationalUnitName  = optional
+
+[ req ]
+distinguished_name = dn
+
+[ dn ]
+CNF
+
+openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+	-keyout "$WORK/ca/ca.key" -out "$WORK/ca/ca.crt" \
+	-subj "/CN=expiry test ca" > /dev/null 2>&1 ||
+	{ echo "openssl could not make the test ca" >&2; exit 2; }
+
 make_cert() {
-	# $1 name, $2 days until it expires (may be negative)
-	openssl req -x509 -newkey rsa:2048 -nodes \
-		-keyout "$WORK/certs/$1.key" -out "$WORK/certs/$1.crt" \
-		-subj "/CN=$1.test" \
-		-not_before "$(stamp -30)" -not_after "$(stamp "$2")" \
+	# $1 name, $2 signed days until it expires
+	openssl req -new -newkey rsa:2048 -nodes \
+		-keyout "$WORK/certs/$1.key" -out "$WORK/certs/$1.csr" \
+		-subj "/CN=$1.test" > /dev/null 2>&1 ||
+		{ echo "openssl could not make the $1 request" >&2; exit 2; }
+
+	openssl ca -batch -config "$WORK/ca/openssl.cnf" \
+		-startdate "$(stamp -30)" -enddate "$(stamp "$2")" \
+		-in "$WORK/certs/$1.csr" -out "$WORK/certs/$1.crt" \
 		> /dev/null 2>&1 ||
-		{ echo "openssl could not make the $1 certificate" >&2; exit 2; }
+		{ echo "openssl could not sign the $1 certificate" >&2; exit 2; }
 }
 
-make_cert soon 3
-make_cert later 365
+make_cert soon +3
+make_cert later +365
 make_cert gone -5
 
 for n in soon later gone; do
@@ -104,9 +152,8 @@ http {
 CONF
 
 cleanup() {
-	# every line survives a failure of its own: this runs from an EXIT
-	# trap under set -e, where a failed test aborts the function and
-	# makes its status the status of the whole script
+	# runs from an EXIT trap under set -e, where a failing line would
+	# abort the function and become the exit status of the script
 	if [ -f "$WORK/logs/nginx.pid" ]; then
 		kill -QUIT "$(cat "$WORK/logs/nginx.pid")" 2>/dev/null || true
 	fi
@@ -117,27 +164,27 @@ trap cleanup EXIT INT TERM
 "$NGINX" -p "$WORK" -c "$WORK/conf/nginx.conf"
 sleep 1
 
-echo "--- what the worker said at startup ---"
+echo "== lines written at worker start"
 grep -E 'certificate "' "$WORK/logs/error.log" | sed 's/^.*\] //' | sed 's/^/  /'
 
-echo "--- a certificate three days from its end is a warning ---"
+echo "== soon.crt: 3 days left, expect warn"
 grep -q '\[warn\].*certificate .*soon.crt" expires in [0-9]* days' \
 	"$WORK/logs/error.log" ||
 	note "no warning for the certificate that expires in three days"
 
-echo "--- a certificate that is already over is an error ---"
+echo "== gone.crt: expired, expect error"
 grep -q '\[error\].*certificate .*gone.crt" expired [0-9]* days ago' \
 	"$WORK/logs/error.log" ||
 	note "no error line for the expired certificate"
 
-echo "--- a certificate with a year left is only mentioned ---"
+echo "== later.crt: 365 days left, expect info only"
 grep -q '\[info\].*certificate .*later.crt" is good for [0-9]* more days' \
 	"$WORK/logs/error.log" ||
 	note "the long lived certificate was not mentioned at info level"
 grep -E '\[(warn|error)\]' "$WORK/logs/error.log" | grep -q 'later.crt' &&
 	note "the long lived certificate was warned about"
 
-echo "--- the variable answers over a handshake ---"
+echo '== $ssl_expiry_days over a handshake'
 days=$(curl -ks --max-time 5 "https://127.0.0.1:$PORT/days" || true)
 echo "  soon.test says $days day(s) left"
 case $days in
@@ -147,7 +194,7 @@ esac
 [ "${days:-99}" -le 3 ] 2>/dev/null ||
 	note "the variable says $days days, the certificate has three"
 
-echo "--- the check runs again on its own ---"
+echo "== the timer fires again"
 before=$(grep -c 'certificate .*soon.crt' "$WORK/logs/error.log" || true)
 sleep 5
 after=$(grep -c 'certificate .*soon.crt' "$WORK/logs/error.log" || true)
@@ -155,7 +202,7 @@ echo "  $before lines at first, $after after five seconds"
 [ "$after" -gt "$before" ] ||
 	note "the timer did not fire again"
 
-echo "--- nothing alarming in the error log ---"
+echo "== error log"
 if grep -qE '\[(alert|emerg)\]' "$WORK/logs/error.log"; then
 	note "alert or emerg in the error log"
 	grep -E '\[(alert|emerg)\]' "$WORK/logs/error.log" | head -3 >&2

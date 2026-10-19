@@ -26,20 +26,20 @@
 [lint-badge]: https://github.com/sysadmin-labs/nginx-cert-expiry-module/actions/workflows/lint.yml/badge.svg
 [lint-link]: https://github.com/sysadmin-labs/nginx-cert-expiry-module/actions/workflows/lint.yml
 
-A warning in the error log before a certificate runs out, and a variable
-that says how many days are left.
+Warns in the error log before a certificate runs out and provides the days
+left as a variable.
 
-nginx says nothing about an expiring certificate.  It loads the file,
-serves it until the last second and then hands out a certificate the client
-refuses -- the first notice usually comes from a user.  An ACME client that
-stopped renewing six weeks ago is invisible until exactly that moment.
+nginx says nothing about an expiring certificate.  It loads the file, serves
+it until the last second and then presents a certificate the client refuses,
+so an ACME client that stopped renewing weeks ago stays invisible until that
+moment.
 
 ## Synopsis
 
 ```nginx
 http {
-    cert_expiry_warn  14d;      # warn below this
-    cert_expiry_check 12h;      # and look again this often
+    cert_expiry_warn  14d;
+    cert_expiry_check 12h;
 
     server {
         listen 443 ssl;
@@ -53,7 +53,7 @@ http {
 }
 ```
 
-The error log then carries, when a worker starts and on every check:
+The error log then carries, at worker start and on every check:
 
 ```
 [warn] certificate "/usr/local/etc/ssl/shop.crt" expires in 9 days
@@ -69,10 +69,10 @@ The error log then carries, when a worker starts and on every check:
 **default:** `14d`
 **context:** `http`
 
-Below this much remaining time a certificate is reported at **warn**
-level.  A certificate that has already expired is reported at **error**
-level whatever this says, and one with more time left is mentioned at
-**info** level, so a log at that level shows the whole inventory.
+Below this much remaining time a certificate is reported at warn level.  An
+expired one is reported at error level regardless of this setting, one with
+more time left at info level, so a log at that level holds the full
+inventory.
 
 ### `cert_expiry_check`
 
@@ -80,54 +80,53 @@ level whatever this says, and one with more time left is mentioned at
 **default:** `12h`
 **context:** `http`
 
-How often the certificates are read again.  A server that runs for months
-would otherwise report the state it found on the morning it started.
+How often the certificates are read again.  Without it a server running for
+months would keep reporting the state of the morning it started.
 
 ## Variables
 
 ### `$ssl_expiry_days`
 
-Days left on the certificate **this connection** was served with -- not the
-configured file but the one OpenSSL picked, which is the honest answer when
-a server carries an RSA and an ECDSA certificate at once.  Empty on a
-connection without TLS.
+Days left on the certificate the current connection was served with, which
+is the one OpenSSL picked rather than the first one configured, the
+difference being visible on a server carrying an RSA and an ECDSA
+certificate at once.  Empty on a connection without TLS.
 
-## What it watches, and what it cannot
+## Scope
 
-Every file named by an `ssl_certificate` in any server, once, no matter how
+Every file named by an `ssl_certificate` in any server is read once, however
 many servers share it.
 
-A certificate whose path carries variables is **not** watched: the file is
-only known once a handshake names a server, and reporting on the literal
-text of the directive would be reporting on a file that does not exist.
-Such a server is noted at info level when the configuration is read.  The
-variable still answers for those connections.
+A certificate whose path contains variables is not watched: the file is only
+known once a handshake has named a server, and the literal text of the
+directive names no file.  Such a server is noted at info level when the
+configuration is read, and `$ssl_expiry_days` still answers for its
+connections.
 
-The reading is done by **one** worker.  Every worker reading the same files
-and writing the same line would make the log harder to read, not the
-certificate fresher.
+One worker does the reading.  Every worker reporting the same files would
+multiply the lines in the log without making a certificate fresher.
 
-## Building
+## Installation
 
-The module needs an nginx with TLS:
+The module requires an nginx with TLS:
 
 ```sh
 ./configure --with-http_ssl_module \
     --add-module=/path/to/nginx-cert-expiry-module
 ```
 
-or, as a loadable module,
+or as a loadable module
 
 ```sh
 ./configure --with-http_ssl_module \
     --add-dynamic-module=/path/to/nginx-cert-expiry-module
 ```
 
-and then `load_module modules/ngx_http_cert_expiry_module.so;` in the main
-context.  A build without `--with-http_ssl_module` is refused at configure
+with `load_module modules/ngx_http_cert_expiry_module.so;` in the main
+context.  A build without `--with-http_ssl_module` is rejected at configure
 time.
 
-## Testing
+## Tests
 
 ```sh
 ci/build.sh 1.30.5 /tmp/nginx-test
@@ -136,10 +135,10 @@ ci/expiry.sh /tmp/nginx-test/sbin/nginx
 ci/reload.sh /tmp/nginx-test/sbin/nginx
 ```
 
-`ci/expiry.sh` makes three certificates -- one three days from its end, one
-with a year, one that expired five days ago -- and reads back what the
-module says about each.
+`ci/expiry.sh` signs three certificates through a local CA, one three days
+from its end, one with a year, one that expired five days ago, and reads
+back what the module reports about each.
 
 ## License
 
-BSD 2-Clause.  See [LICENSE](LICENSE).
+BSD 2-Clause, see [LICENSE](LICENSE).

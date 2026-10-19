@@ -109,9 +109,9 @@ static ngx_str_t  ngx_http_cert_expiry_name =
 
 
 /*
- * Days left on the certificate this connection was served with.  Not the
- * configured file but the one OpenSSL picked, which is the honest answer
- * when a server carries an RSA and an ECDSA certificate at once.
+ * Days left on the certificate this connection was served with: the one
+ * OpenSSL picked, not the first one configured.  The two differ on a server
+ * carrying an RSA and an ECDSA certificate.
  */
 static ngx_int_t
 ngx_http_cert_expiry_variable(ngx_http_request_t *r,
@@ -180,10 +180,9 @@ ngx_http_cert_expiry_add_variables(ngx_conf_t *cf)
 
 
 /*
- * How many seconds the certificate in this file has left.  The file is
- * read rather than asked of the SSL context, because a context hands back
- * one certificate while a server may have been given several, and because
- * this has to work before a single handshake has happened.
+ * Seconds left on the certificate in this file.  Read from the file and not
+ * from the SSL context: a context holds one certificate while a server may
+ * have several, and this runs before the first handshake.
  */
 static ngx_int_t
 ngx_http_cert_expiry_left(ngx_str_t *file, time_t *left, ngx_log_t *log)
@@ -293,10 +292,8 @@ ngx_http_cert_expiry_init_process(ngx_cycle_t *cycle)
     }
 
     /*
-     * One worker does the checking.  Every worker reading the same files
-     * and writing the same warning would say the same thing as often as
-     * the server has workers, which makes the log harder to read, not the
-     * certificate fresher.
+     * One worker does the checking: every worker reading the same files
+     * would repeat the same line once per worker.
      */
     if (ngx_process == NGX_PROCESS_WORKER && ngx_worker != 0) {
         return NGX_OK;
@@ -346,10 +343,10 @@ ngx_http_cert_expiry_init_main_conf(ngx_conf_t *cf, void *conf)
 {
     ngx_http_cert_expiry_main_conf_t  *cemcf = conf;
 
-    /* a fortnight, which is what an ACME client has already failed at */
+    /* 14d */
     ngx_conf_init_value(cemcf->warn, 14 * 86400);
 
-    /* twice a day: often enough to catch a renewal that did not happen */
+    /* 12h */
     ngx_conf_init_msec_value(cemcf->interval, 12 * 60 * 60 * 1000);
 
     return NGX_CONF_OK;
@@ -358,8 +355,7 @@ ngx_http_cert_expiry_init_main_conf(ngx_conf_t *cf, void *conf)
 
 /*
  * Collect every file named by an ssl_certificate, once.  The list is built
- * here, in the master, so a worker never walks the configuration and never
- * allocates for this again.
+ * in the master, so a worker never walks the configuration for this.
  */
 static ngx_int_t
 ngx_http_cert_expiry_postconf(ngx_conf_t *cf)
@@ -392,10 +388,9 @@ ngx_http_cert_expiry_postconf(ngx_conf_t *cf)
 
         if (sscf->certificate_values != NULL) {
             /*
-             * The file name carries variables, so it is only known once a
-             * handshake names a server.  Saying so is better than checking
-             * the literal text of the directive and reporting on a file
-             * that does not exist.
+             * The file name carries variables and is known only once a
+             * handshake has named a server.  The literal text of the
+             * directive names no file, so there is nothing to read here.
              */
             ngx_conf_log_error(NGX_LOG_INFO, cf, 0,
                                "cert_expiry: a certificate given with "
