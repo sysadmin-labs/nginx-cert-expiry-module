@@ -29,13 +29,20 @@
 
 
 /*
- * The fence against a notAfter that overflows a 32 bit time_t, which is what
- * FreeBSD on i386 still has.  Days times 86400 has to stay inside it, so the
- * fence itself is the first thing to check: 24000 * 86400 is 2073600000, a
- * little under the 2147483647 that fits.  A date past the fence is reported
- * as being on it, which for 65 years out is no loss.
+ * Two fences against a notAfter that overflows a 32 bit time_t, which is
+ * what FreeBSD on i386 still has.
+ *
+ * The first one is on the days: days times 86400 has to stay inside time_t
+ * by itself, and 24000 * 86400 is 2073600000, a little under the 2147483647
+ * that fits.  The second one is on the sum, because the remaining time is
+ * added to the clock and the clock already eats most of that range: in 2026
+ * only about eleven years of it are left.  A date past either fence is
+ * reported as being on it, which for a certificate decades out is no loss.
  */
 #define NGX_HTTP_CERT_EXPIRY_MAX_DAYS  24000
+
+#define NGX_HTTP_CERT_EXPIRY_MAX_TIME                                         \
+    ((time_t) ((((uint64_t) 1) << (sizeof(time_t) * 8 - 1)) - 1))
 
 /* a timer of zero fires on every turn of the event loop */
 #define NGX_HTTP_CERT_EXPIRY_MIN_CHECK 1000
@@ -254,6 +261,7 @@ ngx_http_cert_expiry_read(ngx_str_t *file, time_t *expires, ngx_log_t *log,
     BIO        *bio;
     X509       *cert;
     int         days, seconds;
+    time_t      left;
     ngx_uint_t  level;
     ASN1_TIME  *notafter;
 
@@ -301,7 +309,15 @@ ngx_http_cert_expiry_read(ngx_str_t *file, time_t *expires, ngx_log_t *log,
         seconds = 0;
     }
 
-    *expires = ngx_time() + (time_t) days * 86400 + seconds;
+    left = (time_t) days * 86400 + seconds;
+
+    /* and the sum, which the clock has already used most of the room for */
+    if (left > NGX_HTTP_CERT_EXPIRY_MAX_TIME - ngx_time()) {
+        *expires = NGX_HTTP_CERT_EXPIRY_MAX_TIME;
+
+    } else {
+        *expires = ngx_time() + left;
+    }
 
     return NGX_OK;
 }
