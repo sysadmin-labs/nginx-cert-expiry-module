@@ -82,8 +82,9 @@ inventory.
 **default:** `12h`
 **context:** `http`
 
-How often the certificates are read again.  Without it a server running for
-months would keep reporting the state of the morning it started.
+How often the certificates are looked at again, at least one second.
+Without it a server running for months would keep reporting the state of the
+morning it started.
 
 ## Variables
 
@@ -103,13 +104,17 @@ Every file named by an `ssl_certificate` in an `http` server is read once,
 however many servers share it.  A certificate of a `stream` server is not
 watched.
 
-The dates are read by the master process, when the configuration is read:
-that is where the privileges of the user who started nginx still apply, and
-a certificate on disk is commonly readable by root alone, while a worker
-runs as an unprivileged user.  A worker then only subtracts those dates from
-the clock, which also keeps file reads out of the event loop.  A certificate
-that was renewed on disk is therefore reported after a reload, which is also
-when nginx starts serving it.
+The dates are read first by the master process, when the configuration is
+read: that is where the privileges of the user who started nginx still
+apply, and a certificate on disk is commonly readable by root alone, while a
+worker runs as an unprivileged user.  On every check the worker reads the
+files again and takes the new dates where it may; where it may not, the
+dates from the master stand and it says so at info level.  A renewal is
+therefore noticed on the next check if the worker can read the file, and
+after a reload if it cannot.
+
+A date more than 24000 days out, which is what a 32 bit `time_t` still
+holds, is reported as being on that fence.
 
 Not watched, and noted at info level when the configuration is read: a
 certificate whose path contains variables, since the file is known only once
@@ -121,7 +126,8 @@ One worker reports.  Every worker writing the same line would multiply it by
 the number of workers.
 
 A file that cannot be read, holds no PEM certificate or carries no readable
-`notAfter` is reported once, at startup:
+`notAfter` is reported when the configuration is read, so at startup and on
+every reload, and at info level on every check that cannot read it:
 
 ```
 [error] cert_expiry: cannot open "/usr/local/etc/ssl/shop.crt"
@@ -129,7 +135,7 @@ A file that cannot be read, holds no PEM certificate or carries no readable
 [error] cert_expiry: "/usr/local/etc/ssl/shop.crt" has no readable notAfter
 ```
 
-## Installation
+## Building
 
 The module requires an nginx with TLS:
 
@@ -149,7 +155,7 @@ with `load_module modules/ngx_http_cert_expiry_module.so;` in the main
 context.  A build without `--with-http_ssl_module` is rejected at configure
 time.
 
-## Tests
+## Testing
 
 ```sh
 ci/build.sh 1.30.5 /tmp/nginx-test

@@ -28,8 +28,17 @@
 #include <openssl/x509.h>
 
 
-/* a hundred years, the fence against a notAfter that overflows a 32 bit time_t */
-#define NGX_HTTP_CERT_EXPIRY_MAX_DAYS  36500
+/*
+ * The fence against a notAfter that overflows a 32 bit time_t, which is what
+ * FreeBSD on i386 still has.  Days times 86400 has to stay inside it, so the
+ * fence itself is the first thing to check: 24000 * 86400 is 2073600000, a
+ * little under the 2147483647 that fits.  A date past the fence is reported
+ * as being on it, which for 65 years out is no loss.
+ */
+#define NGX_HTTP_CERT_EXPIRY_MAX_DAYS  24000
+
+/* a timer of zero fires on every turn of the event loop */
+#define NGX_HTTP_CERT_EXPIRY_MIN_CHECK 1000
 
 
 typedef struct {
@@ -57,8 +66,11 @@ static ngx_int_t ngx_http_cert_expiry_init_process(ngx_cycle_t *cycle);
 static void ngx_http_cert_expiry_exit_process(ngx_cycle_t *cycle);
 static void ngx_http_cert_expiry_timer(ngx_event_t *ev);
 static void ngx_http_cert_expiry_check(
-    ngx_http_cert_expiry_main_conf_t *cemcf, ngx_log_t *log);
+    ngx_http_cert_expiry_main_conf_t *cemcf, ngx_log_t *log,
+    ngx_uint_t reread);
 static time_t ngx_http_cert_expiry_days(int days, int seconds);
+static ngx_int_t ngx_http_cert_expiry_read(ngx_str_t *file, time_t *expires,
+    ngx_log_t *log, ngx_uint_t quiet);
 
 
 static ngx_command_t  ngx_http_cert_expiry_commands[] = {
@@ -229,23 +241,29 @@ ngx_http_cert_expiry_days(int days, int seconds)
 
 
 /*
- * When the certificate in this file runs out.  Read in the master, where
- * the configuration is read and the privileges are still those of the
- * process that started nginx: a worker runs as an unprivileged user and a
- * certificate on disk is commonly readable by root alone.
+ * When the certificate in this file runs out.  The master reads it first,
+ * where the privileges are still those of the process that started nginx: a
+ * worker runs as an unprivileged user and a certificate on disk is commonly
+ * readable by root alone.  A worker reads it again on every check and keeps
+ * quiet when it may not, which is what "quiet" is for.
  */
 static ngx_int_t
-ngx_http_cert_expiry_read(ngx_str_t *file, time_t *expires, ngx_log_t *log)
+ngx_http_cert_expiry_read(ngx_str_t *file, time_t *expires, ngx_log_t *log,
+    ngx_uint_t quiet)
 {
     BIO        *bio;
     X509       *cert;
     int         days, seconds;
+    ngx_uint_t  level;
     ASN1_TIME  *notafter;
+
+    /* a worker that may not read the file is not an error, see the caller */
+    level = quiet ? NGX_LOG_INFO : NGX_LOG_ERR;
 
     bio = BIO_new_file((char *) file->data, "r");
     if (bio == NULL) {
         ERR_clear_error();
-        ngx_log_error(NGX_LOG_ERR, log, 0,
+        ngx_log_error(level, log, 0,
                       "cert_expiry: cannot open \"%V\"", file);
         return NGX_ERROR;
     }
@@ -256,7 +274,7 @@ ngx_http_cert_expiry_read(ngx_str_t *file, time_t *expires, ngx_log_t *log)
 
     if (cert == NULL) {
         ERR_clear_error();
-        ngx_log_error(NGX_LOG_ERR, log, 0,
+        ngx_log_error(level, log, 0,
                       "cert_expiry: \"%V\" holds no PEM certificate", file);
         return NGX_ERROR;
     }
@@ -265,7 +283,7 @@ ngx_http_cert_expiry_read(ngx_str_t *file, time_t *expires, ngx_log_t *log)
 
     if (notafter == NULL || !ASN1_TIME_diff(&days, &seconds, NULL, notafter)) {
         ERR_clear_error();
-        ngx_log_error(NGX_LOG_ERR, log, 0,
+        ngx_log_error(level, log, 0,
                       "cert_expiry: \"%V\" has no readable notAfter", file);
         X509_free(cert);
         return NGX_ERROR;
@@ -273,8 +291,13 @@ ngx_http_cert_expiry_read(ngx_str_t *file, time_t *expires, ngx_log_t *log)
 
     X509_free(cert);
 
+    /* both ends, or the fence is the overflow it was put there to stop */
     if (days > NGX_HTTP_CERT_EXPIRY_MAX_DAYS) {
         days = NGX_HTTP_CERT_EXPIRY_MAX_DAYS;
+        seconds = 0;
+
+    } else if (days < -NGX_HTTP_CERT_EXPIRY_MAX_DAYS) {
+        days = -NGX_HTTP_CERT_EXPIRY_MAX_DAYS;
         seconds = 0;
     }
 
@@ -286,9 +309,9 @@ ngx_http_cert_expiry_read(ngx_str_t *file, time_t *expires, ngx_log_t *log)
 
 static void
 ngx_http_cert_expiry_check(ngx_http_cert_expiry_main_conf_t *cemcf,
-    ngx_log_t *log)
+    ngx_log_t *log, ngx_uint_t reread)
 {
-    time_t                        left, ago;
+    time_t                        left, ago, expires;
     ngx_uint_t                    i;
     ngx_http_cert_expiry_cert_t  *cert;
 
@@ -299,6 +322,23 @@ ngx_http_cert_expiry_check(ngx_http_cert_expiry_main_conf_t *cemcf,
     cert = cemcf->certs->elts;
 
     for (i = 0; i < cemcf->certs->nelts; i++) {
+
+        /*
+         * The date the master read is the one that is certain to exist; a
+         * worker may not be allowed to read the file at all.  But a renewal
+         * replaces the file without telling anybody, and a date frozen at
+         * startup would then count down past zero and keep reporting a
+         * certificate that has long been replaced.  So the file is read
+         * again where that is possible, and the date from the master stands
+         * where it is not.
+         */
+        if (reread
+            && ngx_http_cert_expiry_read(&cert[i].name, &expires, log, 1)
+               == NGX_OK)
+        {
+            cert[i].expires = expires;
+            cert[i].valid = 1;
+        }
 
         if (!cert[i].valid) {
             continue;
@@ -346,7 +386,7 @@ ngx_http_cert_expiry_timer(ngx_event_t *ev)
         return;
     }
 
-    ngx_http_cert_expiry_check(cemcf, ev->log);
+    ngx_http_cert_expiry_check(cemcf, ev->log, 1);
 
     if (!ngx_exiting && !ngx_terminate && !ngx_quit) {
         ngx_add_timer(ev, cemcf->interval);
@@ -355,9 +395,9 @@ ngx_http_cert_expiry_timer(ngx_event_t *ev)
 
 
 /*
- * The master reads the dates; the worker only subtracts them from the
- * clock.  A certificate that was renewed on disk is read again when the
- * configuration is, which is also when nginx starts serving it.
+ * The dates a worker starts from, read where the privileges still allow it.
+ * A worker that may read the files picks up a renewal on its own; one that
+ * may not keeps counting down from these.
  */
 static ngx_int_t
 ngx_http_cert_expiry_init_module(ngx_cycle_t *cycle)
@@ -373,12 +413,21 @@ ngx_http_cert_expiry_init_module(ngx_cycle_t *cycle)
         return NGX_OK;
     }
 
+    /*
+     * "nginx -t" reads the configuration as whoever runs it, and a
+     * certificate readable by root alone would make every such test print an
+     * error about a file the test has no business opening.
+     */
+    if (ngx_test_config) {
+        return NGX_OK;
+    }
+
     cert = cemcf->certs->elts;
 
     for (i = 0; i < cemcf->certs->nelts; i++) {
         cert[i].valid = (ngx_http_cert_expiry_read(&cert[i].name,
                                                    &cert[i].expires,
-                                                   cycle->log) == NGX_OK);
+                                                   cycle->log, 0) == NGX_OK);
     }
 
     return NGX_OK;
@@ -405,7 +454,7 @@ ngx_http_cert_expiry_init_process(ngx_cycle_t *cycle)
         return NGX_OK;
     }
 
-    ngx_http_cert_expiry_check(cemcf, cycle->log);
+    ngx_http_cert_expiry_check(cemcf, cycle->log, 0);
 
     ngx_http_cert_expiry_dumb.fd = (ngx_socket_t) -1;
 
@@ -456,6 +505,12 @@ ngx_http_cert_expiry_init_main_conf(ngx_conf_t *cf, void *conf)
 
     /* 12h */
     ngx_conf_init_msec_value(cemcf->interval, 12 * 60 * 60 * 1000);
+
+    if (cemcf->interval < NGX_HTTP_CERT_EXPIRY_MIN_CHECK) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "\"cert_expiry_check\" must be at least 1s");
+        return NGX_CONF_ERROR;
+    }
 
     return NGX_CONF_OK;
 }
