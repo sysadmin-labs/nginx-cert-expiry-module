@@ -47,6 +47,8 @@ http {
         ssl_certificate_key /usr/local/etc/ssl/shop.key;
 
         location = /cert-days {
+            allow 127.0.0.1;
+            deny all;
             return 200 "$ssl_expiry_days\n";
         }
     }
@@ -90,21 +92,42 @@ months would keep reporting the state of the morning it started.
 Days left on the certificate the current connection was served with, which
 is the one OpenSSL picked rather than the first one configured, the
 difference being visible on a server carrying an RSA and an ECDSA
-certificate at once.  Empty on a connection without TLS.
+certificate at once.  Negative once the certificate has run out, and rounded
+towards the past, so a certificate that expired an hour ago reports `-1` and
+never `0`.  Not found on a connection without TLS, which a log format shows
+as `-`.
 
 ## Scope
 
-Every file named by an `ssl_certificate` in any server is read once, however
-many servers share it.
+Every file named by an `ssl_certificate` in an `http` server is read once,
+however many servers share it.  A certificate of a `stream` server is not
+watched.
 
-A certificate whose path contains variables is not watched: the file is only
-known once a handshake has named a server, and the literal text of the
-directive names no file.  Such a server is noted at info level when the
-configuration is read, and `$ssl_expiry_days` still answers for its
+The dates are read by the master process, when the configuration is read:
+that is where the privileges of the user who started nginx still apply, and
+a certificate on disk is commonly readable by root alone, while a worker
+runs as an unprivileged user.  A worker then only subtracts those dates from
+the clock, which also keeps file reads out of the event loop.  A certificate
+that was renewed on disk is therefore reported after a reload, which is also
+when nginx starts serving it.
+
+Not watched, and noted at info level when the configuration is read: a
+certificate whose path contains variables, since the file is known only once
+a handshake has named a server, and one given as `data:` or `engine:`, since
+that names no file at all.  `$ssl_expiry_days` still answers for those
 connections.
 
-One worker does the reading.  Every worker reporting the same files would
-multiply the lines in the log without making a certificate fresher.
+One worker reports.  Every worker writing the same line would multiply it by
+the number of workers.
+
+A file that cannot be read, holds no PEM certificate or carries no readable
+`notAfter` is reported once, at startup:
+
+```
+[error] cert_expiry: cannot open "/usr/local/etc/ssl/shop.crt"
+[error] cert_expiry: "/usr/local/etc/ssl/shop.crt" holds no PEM certificate
+[error] cert_expiry: "/usr/local/etc/ssl/shop.crt" has no readable notAfter
+```
 
 ## Installation
 

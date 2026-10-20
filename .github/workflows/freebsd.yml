@@ -40,7 +40,11 @@ jobs:
             TEST_NGINX_WORKER_USER='root wheel' \
               TEST_NGINX_NO_SHUFFLE=1 \
             TEST_NGINX_BINARY="$HOME/nginx/sbin/nginx" prove -r t/
-            # checked here as well: this system ships its own OpenSSL
-            # next to the one in the ports tree, and the dates are read
-            # through whichever one nginx was linked against
+            # checked here as well: the dates are read through the
+            # OpenSSL of the base system, not the version the Linux jobs use
             ci/expiry.sh "$HOME/nginx/sbin/nginx"
+            # www/nginx ships this module as a loadable object, so that is
+            # the build the package is made of and it is built here too
+            ci/build.sh "$NGINX_VERSION" "$HOME/nginx-dyn" dynamic
+            EXPIRY_LOAD_MODULE=$HOME/nginx-dyn/modules/ngx_http_cert_expiry_module.so \
+              ci/expiry.sh "$HOME/nginx-dyn/sbin/nginx"

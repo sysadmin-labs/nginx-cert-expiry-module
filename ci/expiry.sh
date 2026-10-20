@@ -168,17 +168,17 @@ echo "== lines written at worker start"
 grep -E 'certificate "' "$WORK/logs/error.log" | sed 's/^.*\] //' | sed 's/^/  /'
 
 echo "== soon.crt: 3 days left, expect warn"
-grep -q '\[warn\].*certificate .*soon.crt" expires in [0-9]* days' \
+grep -qE '\[warn\].*certificate .*soon.crt" expires in [0-9]+ days' \
 	"$WORK/logs/error.log" ||
 	note "no warning for the certificate that expires in three days"
 
 echo "== gone.crt: expired, expect error"
-grep -q '\[error\].*certificate .*gone.crt" expired [0-9]* days ago' \
+grep -qE '\[error\].*certificate .*gone.crt" expired [0-9]+ days ago' \
 	"$WORK/logs/error.log" ||
 	note "no error line for the expired certificate"
 
 echo "== later.crt: 365 days left, expect info only"
-grep -q '\[info\].*certificate .*later.crt" is good for [0-9]* more days' \
+grep -qE '\[info\].*certificate .*later.crt" is good for [0-9]+ more days' \
 	"$WORK/logs/error.log" ||
 	note "the long lived certificate was not mentioned at info level"
 grep -E '\[(warn|error)\]' "$WORK/logs/error.log" | grep -q 'later.crt' &&
@@ -193,6 +193,15 @@ case $days in
 esac
 [ "${days:-99}" -le 3 ] 2>/dev/null ||
 	note "the variable says $days days, the certificate has three"
+[ "${days:-0}" -ge 2 ] 2>/dev/null ||
+	note "the variable says $days days, which is too few for three"
+
+gone=$(curl -ks --max-time 5 "https://127.0.0.1:$((PORT + 2))/days" || true)
+echo "  gone.test says $gone day(s) left"
+case $gone in
+-[0-9]*) ;;
+*) note "an expired certificate has to report a negative number, not $gone" ;;
+esac
 
 echo "== the timer fires again"
 before=$(grep -c 'certificate .*soon.crt' "$WORK/logs/error.log" || true)
